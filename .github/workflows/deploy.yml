@@ -35,6 +35,11 @@ jobs:
         env:
            VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
 
+      - name: Verify API base in bundle
+        run: |
+          grep -R "api\.flow-ext-block\.site" -n dist/public || (echo "NOT FOUND in bundle"; exit 1)
+
+
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
