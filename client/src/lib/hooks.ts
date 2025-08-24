@@ -1,162 +1,274 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { blocklistApi, type UpdateFixedExtensionRequest, type AddCustomExtensionRequest } from './api';
-import { useToast } from '@/hooks/use-toast';
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import api from "./api";
+import { AxiosError } from "axios";
+import { toast } from "@/hooks/use-toast";
 
-// Fixed extensions hooks
-export function useFixedExtensions() {
-  return useQuery({
-    queryKey: ['/api/blocklist/fixed'],
-    queryFn: () => blocklistApi.getFixed(),
-  });
+// --- 타입 정의 ---
+
+// 고정 확장자 API 응답 타입
+interface FixedExtensionItem {
+  id: number;
+  ext: string;
+  blocked: boolean;
 }
 
-export function useUpdateFixedExtensions() {
+interface FixedExtensionsResponse {
+  items: FixedExtensionItem[];
+  updatedAt: string;
+}
+
+export interface CustomExtensionItem {
+  id: number;
+  ext: string;
+}
+
+// 커스텀 확장자 API 응답 타입
+interface CustomExtensionsResponse {
+  items: CustomExtensionItem[];
+  count: number;
+  limit: number;
+}
+
+// --- 고정 확장자(FixedExtensions) 관련 훅 ---
+
+/**
+ * 고정 확장자 목록을 서버에서 조회하는 useQuery 훅
+ * API: GET /api/extensions/fixed
+ */
+export const useFixedExtensions = () => {
+  return useQuery<FixedExtensionsResponse, Error>({
+    queryKey: ["fixedExtensions"],
+    queryFn: async () => {
+      const { data } = await api.get("/api/extensions/fixed");
+      return data;
+    },
+  });
+};
+
+/**
+ * 고정 확장자의 차단 상태를 업데이트하는 useMutation 훅
+ * API: PATCH /api/extensions/fixed
+ */
+type Vars = { id: number; blocked: boolean };
+export const useUpdateFixedExtension = () => {
   const queryClient = useQueryClient();
-  const { toast } = useToast();
 
   return useMutation({
-    mutationFn: (data: UpdateFixedExtensionRequest) => blocklistApi.updateFixed(data),
-    onMutate: async (newData) => {
-      // Cancel outgoing refetches
-      await queryClient.cancelQueries({ queryKey: ['/api/blocklist/fixed'] });
+    mutationFn: ({ id, blocked }: Vars) =>
+      api.patch(`/api/extensions/fixed/${id}`, { blocked }),
 
-      // Snapshot the previous value
-      const previousData = queryClient.getQueryData(['/api/blocklist/fixed']);
+    // UX 개선: 낙관적 업데이트
+    onMutate: async (vars) => {
+      await queryClient.cancelQueries({ queryKey: ["fixedExtensions"] });
+      const prev = queryClient.getQueryData<any>(["fixedExtensions"]);
 
-      // Optimistically update
-      queryClient.setQueryData(['/api/blocklist/fixed'], (old: any) => {
-        if (!old) return old;
-        
-        const updatedItems = old.items.map((item: any) => {
-          const update = newData.updates.find(u => u.ext === item.ext);
-          return update ? { ...item, blocked: update.blocked } : item;
-        });
-
+      queryClient.setQueryData(["fixedExtensions"], (old: any) => {
+        if (!old?.items) return old;
         return {
           ...old,
-          items: updatedItems,
+          items: old.items.map((it: any) =>
+            it.id === vars.id ? { ...it, blocked: vars.blocked } : it
+          ),
           updatedAt: new Date().toISOString(),
         };
       });
 
-      return { previousData };
+      return { prev };
     },
-    onError: (err, variables, context) => {
-      // Rollback on error
-      if (context?.previousData) {
-        queryClient.setQueryData(['/api/blocklist/fixed'], context.previousData);
-      }
-      toast({
-        variant: "destructive",
-        title: "오류",
-        description: "설정을 저장하는 중 오류가 발생했습니다. 다시 시도해주세요.",
-      });
+
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(["fixedExtensions"], ctx.prev);
+    },
+
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["fixedExtensions"] });
+    },
+  });
+};
+// --- 커스텀 확장자(CustomExtensions) 관련 훅 ---
+
+/**
+ * 커스텀 확장자 목록을 서버에서 조회하는 useQuery 훅
+ * API: GET /api/extensions/custom
+ */
+export const useCustomExtensions = () => {
+  return useQuery<CustomExtensionsResponse, Error>({
+    queryKey: ["customExtensions"],
+    queryFn: async () => {
+      const { data } = await api.get("/api/extensions/custom");
+      return data;
+    },
+  });
+};
+
+/**
+ * 새로운 커스텀 확장자를 추가하는 useMutation 훅
+ * API: POST /api/extensions/custom
+ */
+export const useAddCustomExtension = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (newExtension: { ext: string }) => {
+      return api.post("/api/extensions/custom", newExtension);
     },
     onSuccess: () => {
+      // 성공 시 커스텀 확장자 목록 쿼리를 무효화하여 최신 데이터로 갱신
+      queryClient.invalidateQueries({ queryKey: ["customExtensions"] });
+    },
+    onError: (error: unknown, variables) => {
+      const err = error as AxiosError<any>;
+      const status = err.response?.status;
+      const serverMsg = (err.response?.data as any)?.message;
+
+      if (status === 409) {
+        // 중복
+        toast({
+          variant: "destructive",
+          title: "이미 추가된 확장자",
+          description:
+            serverMsg || `.${variables.ext} 확장자는 이미 추가되어 있습니다.`,
+        });
+        return;
+      }
+
+      if (status === 400) {
+        toast({
+          variant: "destructive",
+          title: "추가 실패",
+          description:
+            typeof serverMsg === "string"
+              ? serverMsg
+              : "요청을 처리할 수 없습니다.",
+        });
+        return;
+      }
+
+      // 그 외 일반 에러
       toast({
-        title: "성공",
-        description: "설정이 저장되었습니다.",
+        variant: "destructive",
+        title: "추가 실패",
+        description:
+          typeof serverMsg === "string"
+            ? serverMsg
+            : "알 수 없는 오류가 발생했습니다.",
       });
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/blocklist/fixed'] });
-    },
   });
-}
-
-// Custom extensions hooks
-export function useCustomExtensions() {
-  return useQuery({
-    queryKey: ['/api/blocklist/custom'],
-    queryFn: () => blocklistApi.getCustom(),
-  });
-}
-
-export function useAddCustomExtension() {
+};
+/**
+ * 커스텀 확장자를 삭제하는 useMutation 훅
+ * API: DELETE /api/extensions/custom/:ext
+ */
+export const useDeleteCustomExtension = () => {
   const queryClient = useQueryClient();
-  const { toast } = useToast();
 
   return useMutation({
-    mutationFn: (data: AddCustomExtensionRequest) => blocklistApi.addCustom(data),
-    onMutate: async (newData) => {
-      await queryClient.cancelQueries({ queryKey: ['/api/blocklist/custom'] });
-      
-      const previousData = queryClient.getQueryData(['/api/blocklist/custom']);
-      
-      queryClient.setQueryData(['/api/blocklist/custom'], (old: any) => {
-        if (!old) return old;
+    mutationFn: (extensionId: number) =>
+      api.delete(`/api/extensions/custom/${extensionId}`),
+
+    // 낙관적 업데이트: 먼저 리스트에서 제거
+    async onMutate(extensionId) {
+      await queryClient.cancelQueries({ queryKey: ["customExtensions"] });
+      const prev = queryClient.getQueryData<any>(["customExtensions"]);
+
+      // 삭제할 항목 정보(토스트 메시지용) 확보
+      const removed = prev?.items?.find?.((it: any) => it.id === extensionId);
+
+      queryClient.setQueryData(["customExtensions"], (old: any) => {
+        if (!old?.items) return old;
+        const nextItems = old.items.filter((it: any) => it.id !== extensionId);
         return {
           ...old,
-          items: [...old.items, newData.ext].sort(),
-          count: old.count + 1,
+          items: nextItems,
+          count:
+            typeof old.count === "number"
+              ? Math.max(0, old.count - 1)
+              : nextItems.length,
         };
       });
 
-      return { previousData };
+      return { prev, removed };
     },
-    onError: (err: any, variables, context) => {
-      if (context?.previousData) {
-        queryClient.setQueryData(['/api/blocklist/custom'], context.previousData);
+
+    // 실패 시 롤백 + 분기 토스트
+    onError(error, _vars, ctx) {
+      if (ctx?.prev) queryClient.setQueryData(["customExtensions"], ctx.prev);
+
+      const err = error as AxiosError<any>;
+      const status = err.response?.status;
+      const serverMsg = (err.response?.data as any)?.message;
+
+      if (status === 404) {
+        toast({
+          variant: "destructive",
+          title: "삭제 실패",
+          description: "이미 삭제되었거나 존재하지 않는 항목입니다.",
+        });
+        return;
       }
-      const message = err.message || '확장자를 추가하는 중 오류가 발생했습니다.';
+
+      if (status === 400) {
+        toast({
+          variant: "destructive",
+          title: "삭제 실패",
+          description:
+            typeof serverMsg === "string"
+              ? serverMsg
+              : "요청을 처리할 수 없습니다.",
+        });
+        return;
+      }
+
+      if (status === 401 || status === 403) {
+        toast({
+          variant: "destructive",
+          title: "권한 없음",
+          description: "로그인이 필요하거나 권한이 없습니다.",
+        });
+        return;
+      }
+
       toast({
         variant: "destructive",
-        title: "오류",
-        description: message,
+        title: "삭제 실패",
+        description: "알 수 없는 오류가 발생했습니다.",
       });
     },
-    onSuccess: (data) => {
-      toast({
-        title: "성공",
-        description: `.${data.ext} 확장자가 추가되었습니다.`,
-      });
+
+    // 성공 토스트(항목명까지 표시)
+    onSuccess(_data, _vars, ctx) {
+      const ext = ctx?.removed?.ext ? `.${ctx.removed.ext}` : "항목";
+      toast({ title: "삭제됨", description: `${ext}이(가) 삭제되었습니다.` });
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/blocklist/custom'] });
+
+    // 최종 동기화
+    onSettled() {
+      queryClient.invalidateQueries({ queryKey: ["customExtensions"] });
     },
   });
-}
-
-export function useDeleteCustomExtension() {
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
-
+};
+export const useClearAllCustomExtensions = () => {
+  const qc = useQueryClient();
   return useMutation({
-    mutationFn: (ext: string) => blocklistApi.deleteCustom(ext),
-    onMutate: async (deletedExt) => {
-      await queryClient.cancelQueries({ queryKey: ['/api/blocklist/custom'] });
-      
-      const previousData = queryClient.getQueryData(['/api/blocklist/custom']);
-      
-      queryClient.setQueryData(['/api/blocklist/custom'], (old: any) => {
-        if (!old) return old;
-        return {
-          ...old,
-          items: old.items.filter((ext: string) => ext !== deletedExt),
-          count: old.count - 1,
-        };
-      });
-
-      return { previousData, deletedExt };
+    mutationFn: () => api.delete("/api/extensions/custom"), // 204 예상
+    // 낙관적 업데이트로 즉시 비우기
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ["customExtensions"] });
+      const previous = qc.getQueryData<{
+        items: any[];
+        count: number;
+        limit: number;
+      }>(["customExtensions"]);
+      qc.setQueryData(["customExtensions"], (old: any) =>
+        old ? { ...old, items: [], count: 0 } : old
+      );
+      return { previous };
     },
-    onError: (err, variables, context) => {
-      if (context?.previousData) {
-        queryClient.setQueryData(['/api/blocklist/custom'], context.previousData);
-      }
-      toast({
-        variant: "destructive",
-        title: "오류",
-        description: "확장자를 삭제하는 중 오류가 발생했습니다.",
-      });
-    },
-    onSuccess: (_, deletedExt) => {
-      toast({
-        title: "성공",
-        description: `.${deletedExt} 확장자가 삭제되었습니다.`,
-      });
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.previous) qc.setQueryData(["customExtensions"], ctx.previous);
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/blocklist/custom'] });
+      qc.invalidateQueries({ queryKey: ["customExtensions"] });
     },
   });
-}
+};
