@@ -26,9 +26,14 @@ jobs:
         run: |
           mkdir -p client
           echo "VITE_API_BASE_URL=${{ secrets.VITE_API_BASE_URL }}" >> client/.env.production
-
+          
+      - name: Show env file (debug)
+        run: cat client/.env.production
+        
       - name: Build (root script)
         run: npm run build
+        env:
+           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
