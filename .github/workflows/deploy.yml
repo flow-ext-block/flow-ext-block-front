@@ -17,12 +17,11 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json # ✅ 루트 lockfile
+          cache-dependency-path: package-lock.json
 
       - name: Install deps (root)
         run: npm ci
 
-      # ✅ Vite의 root가 client/ 이므로 env 파일은 client/.env.production에 둔다
       - name: Create env for production (client/)
         run: |
           mkdir -p client
@@ -30,7 +29,6 @@ jobs:
 
       - name: Build (root script)
         run: npm run build
-        # vite.config.ts가 root에 있고 내부에서 root: 'client' 설정 → OK
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -39,7 +37,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ outDir: dist/public 에 맞춰 업로드
+      # outDir: dist/public 에 맞춰 업로드
       - name: Upload assets (immutable)
         run: |
           aws s3 sync dist/public s3://${{ secrets.S3_BUCKET_NAME }} \
